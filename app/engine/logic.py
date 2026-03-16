@@ -1,4 +1,5 @@
 from .exceptions import PokerError, InsufficientChipsError, InvalidActionError
+from .hand_evaluator import get_hand_description
 def calculate_blinds(table):
     """Takes chips from the first two active players and adds to pot."""
     # Simplified: Player 0 is SB, Player 1 is BB
@@ -19,85 +20,145 @@ def calculate_blinds(table):
     print(f"Blinds posted: {sb_player.name} ({sb_amount}), {bb_player.name} ({bb_amount})")
 
 def handle_betting_round(table):
-    round_active = True
+    """
+    Handle a betting round with proper raise/re-raise logic.
+    
+    When a player raises, they become the "last aggressor". The action continues
+    around the table until it returns to the last aggressor AND everyone has
+    either matched the bet or folded. If someone re-raises, they become the new
+    last aggressor and the raiser gets another chance to act.
+    """
     table.get_action_order()
-    while round_active:
-        # Reset this count for each loop iteration to ensure everyone acts
-        players_acted = 0
-        highest_bet = max([p.current_bet for p in table.players])
+    
+    # Get active (non-folded) players in action order
+    active_players = [p for p in table.ordered_players if not p.folded and p.is_active]
+    
+    if len(active_players) <= 1:
+        return table
+    
+    # Track the last player who raised/bet - action ends when it comes back to them
+    # Initially set to None so everyone must act at least once
+    last_aggressor = None
+    
+    # Track which players have acted since the last raise
+    # Using player IDs to track who has acted
+    players_acted_since_last_raise = set()
+    
+    # Current position in the ordered_players list
+    current_index = 0
+    
+    highest_bet = max([p.current_bet for p in table.players])
+    
+    while True:
+        # Get current player from ordered list
+        p = table.ordered_players[current_index]
         
-        # In Poker, if the highest bet is 0, 'Check' is possible.
-        # If someone bets, 'Check' is no longer an option.
+        # Skip folded or inactive players
+        if p.folded or not p.is_active:
+            current_index = (current_index + 1) % len(table.ordered_players)
+            continue
         
-        for p in table.ordered_players:
-            if p.folded or not p.is_active:
-                continue
+        # Check termination conditions BEFORE player acts:
+        # 1. Only one player left (everyone else folded)
+        active_count = len([pl for pl in table.players if not pl.folded and pl.is_active])
+        if active_count <= 1:
+            break
+        
+        # 2. Action has returned to the last aggressor AND all active players have acted
+        #    AND everyone's bet matches the highest bet
+        if last_aggressor is not None:
+            all_bets_matched = all(
+                pl.current_bet == highest_bet 
+                for pl in table.players 
+                if not pl.folded and pl.is_active
+            )
+            # If we've come back to the last aggressor and all bets are matched, round is over
+            if p.playerid == last_aggressor and all_bets_matched:
+                break
+        else:
+            # No one has bet/raised yet - check if everyone has checked (all acted, all bets equal)
+            all_have_acted = all(
+                pl.playerid in players_acted_since_last_raise 
+                for pl in table.players 
+                if not pl.folded and pl.is_active
+            )
+            all_bets_matched = all(
+                pl.current_bet == highest_bet 
+                for pl in table.players 
+                if not pl.folded and pl.is_active
+            )
+            if all_have_acted and all_bets_matched:
+                break
 
-            # Termination condition:
-            # Everyone has acted AND everyone's bet matches the highest bet
+        print(f"\n--- {p.name}'s Turn ---")
+        print(f"Hand: {p.current_hand} | Chips: {p.chips}")
+        # Show best hand if community cards are available
+        if table.visible_cards > 0:
+            visible_community = table.community_cards[:table.visible_cards]
+            best_hand = get_hand_description(p, visible_community)
+            print(f"Best Hand: {best_hand}")
+        print(f"Pot: {table.pot} | To Call: {highest_bet - p.current_bet}")
 
-            print(f"\n--- {p.name}'s Turn ---")
-            print(f"Hand: {p.current_hand} | Chips: {p.chips}")
-            print(f"Pot: {table.pot} | To Call: {highest_bet - p.current_bet}")
+        try:
+            # Determine available options to show user
+            options = "(f)old, (r)aise"
+            if p.current_bet == highest_bet:
+                options += ", (c)heck"
+            else:
+                options += ", (c)all"
+            
+            action = input(f"Action {options}: ").strip().lower()
 
-            try:
-                # Determine available options to show user
-                options = "(f)old, (r)aise"
-                if p.current_bet == highest_bet:
-                    options += ", (c)heck"
-                else:
-                    options += ", (c)all"
+            if action in ("fold", "f"):
+                p.folded = True
+                print(f"{p.name} folds.")
+                players_acted_since_last_raise.add(p.playerid)
+            
+            elif action in ("check", "c") and p.current_bet == highest_bet:
+                print(f"{p.name} checks.")
+                players_acted_since_last_raise.add(p.playerid)
+
+            elif action in ("call", "c") and p.current_bet < highest_bet:
+                amount_to_call = highest_bet - p.current_bet
+                if amount_to_call > p.chips:
+                    raise InsufficientChipsError("Not enough chips to call.")
                 
-                action = input(f"Action {options}: ").strip().lower()
+                p.chips -= amount_to_call
+                p.current_bet += amount_to_call
+                table.pot += amount_to_call
+                print(f"{p.name} calls {amount_to_call}.")
+                players_acted_since_last_raise.add(p.playerid)
 
-                if action == "fold":
-                    p.folded = True
+            elif action in ("raise", "r"):
+                raise_amt = int(input(f"Enter TOTAL bet (must be > {highest_bet}): "))
+                if raise_amt <= highest_bet:
+                    raise InvalidActionError(f"Raise must be more than {highest_bet}")
                 
-                elif action == "check":
-                    if p.current_bet < highest_bet:
-                        raise InvalidActionError("Cannot check. You must call or fold.")
-                    # Checking does nothing to the pot or chips
-                    print(f"{p.name} checks.")
-
-                elif action == "call":
-                    amount_to_call = highest_bet - p.current_bet
-                    if amount_to_call > p.chips:
-                        raise InsufficientChipsError("Not enough chips to call.")
-                    
-                    p.chips -= amount_to_call
-                    p.current_bet += amount_to_call
-                    table.pot += amount_to_call
-                    print(f"{p.name} calls {amount_to_call}.")
-
-                elif action == "raise":
-                    raise_amt = int(input(f"Enter TOTAL bet (must be > {highest_bet}): "))
-                    if raise_amt <= highest_bet:
-                        raise InvalidActionError(f"Raise must be more than {highest_bet}")
-                    
-                    total_contribution = raise_amt - p.current_bet
-                    if total_contribution > p.chips:
-                        raise InsufficientChipsError(f"Needs {total_contribution}, has {p.chips}")
-                    
-                    p.chips -= total_contribution
-                    p.current_bet = raise_amt
-                    table.pot += total_contribution
-                    highest_bet = raise_amt
-                    print(f"{p.name} raises to {raise_amt}.")
+                total_contribution = raise_amt - p.current_bet
+                if total_contribution > p.chips:
+                    raise InsufficientChipsError(f"Needs {total_contribution}, has {p.chips}")
                 
-                else:
-                    raise InvalidActionError("Invalid command.")
+                p.chips -= total_contribution
+                p.current_bet = raise_amt
+                table.pot += total_contribution
+                highest_bet = raise_amt
+                print(f"{p.name} raises to {raise_amt}.")
+                
+                # This player is now the last aggressor
+                # Reset the acted set - everyone else needs to act again
+                last_aggressor = p.playerid
+                players_acted_since_last_raise = {p.playerid}
+            
+            else:
+                raise InvalidActionError("Invalid command.")
 
-                players_acted += 1
+            # Move to next player
+            current_index = (current_index + 1) % len(table.ordered_players)
 
-            except (InsufficientChipsError, InvalidActionError, ValueError) as e:
-                print(f"❌ {e}")
-                continue # Let the same player try again
-        if (players_acted >= len([pl for pl in table.players if not pl.folded])) and \
-        all(pl.current_bet == highest_bet for pl in table.players if not pl.folded):
-            round_active = False      
-        # Quick check: If only one person left, stop the round
-        if len([pl for pl in table.players if not pl.folded]) <= 1:
-            round_active = False
+        except (InsufficientChipsError, InvalidActionError, ValueError) as e:
+            print(f"❌ {e}")
+            # Don't move to next player - let the same player try again
+            continue
 
     # Reset current_bet for all players at the end of the round
     for p in table.players:

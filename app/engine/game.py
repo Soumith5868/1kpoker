@@ -8,7 +8,7 @@ class pokertable:
         self.players: List[Player] = [] 
         self.deck: List[Card] = self.generate_deck()
         self.pot: int = 0
-        self.stage = "PRE FLOP"
+        self.stage = "PRE-FLOP"
         self.sb_amount = 100
         self.bb_amount = 200
         self.sb_pos:int = -1 #postion of small blind
